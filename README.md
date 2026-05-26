@@ -7,7 +7,7 @@
 
 # WiFi Business Network Monitoring System
 
-Hey everyone, welcome to my network engineering portfolio project
+Hey everyone, welcome to my project
 I built this because I noticed that most monitoring tools are either way too expensive or too complicated for small businesses like WiFi cafes or WISPs
 So I decided to build my own monitoring stack using free open-source tools that anyone can run locally
 
