@@ -167,6 +167,41 @@ Here is how each part connects together
 
 ---
 
+## Challenges Faced and Troubleshooting Journey
+
+Building this environment locally was not smooth at all
+Integrating VirtualBox with Docker on a Windows host with WSL2 backend introduced some nasty networking problems
+Here are the three main issues I ran into and how I fixed them
+
+**1 - The UDP and WSL2 Trap (connection refused)**
+
+My first attempt used `host.docker.internal` with VirtualBox NAT Port Forwarding so the SNMP Exporter could reach the router
+But Docker on WSL2 has a known issue where UDP packets (which SNMP uses) often get dropped or misrouted through that path
+The exporter kept throwing `connection refused` even though the port forwarding rules were correct
+
+- Fix: I dropped the NAT Port Forwarding idea completely and created a dedicated VirtualBox Host-Only Adapter instead
+- This puts the MikroTik VM and the Windows host on the same `192.168.56.0/24` subnet so communication is direct with no middleman handling the UDP packets
+
+**2 - Target String Misconfiguration in Prometheus (context deadline exceeded)**
+
+After fixing the network route, Prometheus was still failing with `context deadline exceeded` on every scrape
+I had set the scrape target as `192.168.56.103:161` thinking I needed to specify the SNMP port explicitly
+
+- Fix: The SNMP Exporter already handles the port internally through the module configuration
+- Having `:161` in the target string confused the exporter because it was being passed as part of the host address
+- Removing it and leaving just `192.168.56.103` made the scrape succeed immediately
+
+**3 - The VirtualBox Host-Only Adapter Going Silent (host unreachable)**
+
+At one point the Windows host completely lost the ability to ping the router even though nothing changed in the config
+The MikroTik VM was running, SNMP was enabled, but every ping timed out and Grafana showed no data
+
+- Fix: The VirtualBox Host-Only network adapter on Windows had silently glitched and stopped passing traffic
+- I went to Windows Network Connections (`ncpa.cpl`), disabled the VirtualBox Host-Only Ethernet Adapter, then re-enabled it
+- The pings came back instantly and Grafana started populating data again
+
+---
+
 ## Live Testing - Normal Traffic vs Network Down
 
 I ran two tests to prove the stack actually works and responds correctly to real network events
