@@ -1,3 +1,10 @@
+![MikroTik](https://img.shields.io/badge/MikroTik-293239?style=for-the-badge&logo=mikrotik&logoColor=white)
+![Grafana](https://img.shields.io/badge/Grafana-F46800?style=for-the-badge&logo=grafana&logoColor=white)
+![Prometheus](https://img.shields.io/badge/Prometheus-E6522C?style=for-the-badge&logo=prometheus&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-2496ED?style=for-the-badge&logo=docker&logoColor=white)
+![SNMP](https://img.shields.io/badge/SNMP-v2c-4B8BBE?style=for-the-badge&logo=cisco&logoColor=white)
+![Network Monitoring](https://img.shields.io/badge/Network_Monitoring-open--source-22c55e?style=for-the-badge&logo=grafana&logoColor=white)
+
 # WiFi Business Network Monitoring System
 
 Hey everyone, welcome to my network engineering portfolio project
