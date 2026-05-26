@@ -1,0 +1,157 @@
+# =============================================================================
+# DOCKER COMPOSE — WiFi Monitor Project
+# =============================================================================
+#
+# This file orchestrates our 3-container monitoring stack:
+#
+#   ┌─────────────────┐     ┌──────────────┐     ┌──────────────┐
+#   │  SNMP Exporter   │────▶│  Prometheus   │────▶│   Grafana     │
+#   │  (translator)    │     │  (database)   │     │  (dashboard)  │
+#   │  Port: 9116      │     │  Port: 9090   │     │  Port: 3000   │
+#   └────────┬─────────┘     └──────────────┘     └──────────────┘
+#            │
+#            │ SNMP (UDP)
+#            ▼
+#   ┌─────────────────┐
+#   │ host.docker.     │
+#   │ internal:16161   │──── VirtualBox NAT ────▶ MikroTik CHR :161
+#   └─────────────────┘
+#
+# STARTING:   docker compose up -d
+# STOPPING:   docker compose down
+# LOGS:       docker compose logs -f [service-name]
+# REBUILD:    docker compose up -d --force-recreate
+#
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # SERVICE 1: SNMP EXPORTER
+  # ---------------------------------------------------------------------------
+  # The translator between SNMP (the router's language) and Prometheus
+  # (our monitoring system's language).
+  #
+  # It does NOT store any data. It's a real-time proxy:
+  #   Prometheus asks → Exporter queries router via SNMP → returns metrics
+  #
+  # WHY extra_hosts?
+  # On Docker Desktop (WSL2 backend), "host.docker.internal" resolves
+  # automatically. But adding extra_hosts with "host-gateway" is a
+  # safety net that works across all Docker platforms (Linux included).
+  # This ensures the container can always reach the Windows host machine.
+  # ---------------------------------------------------------------------------
+  snmp-exporter:
+    image: prom/snmp-exporter:latest
+    container_name: snmp-exporter
+    volumes:
+      # Mount our custom SNMP config (read-only for safety)
+      - ./snmp-exporter/snmp.yml:/etc/snmp_exporter/snmp.yml:ro
+    ports:
+      # Expose on host for debugging: http://localhost:9116
+      - "9116:9116"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    networks:
+      - monitoring
+
+  # ---------------------------------------------------------------------------
+  # SERVICE 2: PROMETHEUS
+  # ---------------------------------------------------------------------------
+  # The time-series database. Every 30 seconds, it pulls metrics from the
+  # SNMP Exporter and stores them with timestamps.
+  #
+  # WHY 30-DAY RETENTION?
+  # For a portfolio project, 30 days is plenty to show trends.
+  # In production, you might use 90 days or offload to long-term storage
+  # (Thanos, Cortex, etc.).
+  #
+  # NAMED VOLUME: prometheus_data
+  # Stores the time-series database files. Without this, you'd lose ALL
+  # your historical metrics every time the container restarts.
+  # ---------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
+      - "--web.enable-lifecycle"    # Allows hot-reload via POST /-/reload
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      # Web UI & API: http://localhost:9090
+      - "9090:9090"
+    depends_on:
+      - snmp-exporter
+    restart: unless-stopped
+    networks:
+      - monitoring
+
+  # ---------------------------------------------------------------------------
+  # SERVICE 3: GRAFANA
+  # ---------------------------------------------------------------------------
+  # The frontend dashboard. Connects to Prometheus and displays beautiful
+  # graphs that a non-technical business owner can understand.
+  #
+  # AUTO-PROVISIONING:
+  # We mount a provisioning directory that tells Grafana:
+  #   1. Where to find its data source (Prometheus at http://prometheus:9090)
+  #   2. Where to find dashboard JSON files (auto-loaded on first boot)
+  #
+  # This means the dashboard appears automatically — no manual setup needed.
+  # Perfect for a demo or portfolio: just docker compose up and everything works.
+  #
+  # DEFAULT CREDENTIALS: admin / admin
+  # Grafana will prompt to change the password on first login.
+  # For a lab, this is fine. In production, use proper auth.
+  # ---------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    volumes:
+      # Auto-provision data sources and dashboards (read-only)
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      # Persist dashboards, users, and settings across restarts
+      - grafana_data:/var/lib/grafana
+    ports:
+      # Web UI: http://localhost:3000
+      - "3000:3000"
+    environment:
+      # Default admin credentials (change on first login)
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      # Dark theme — looks professional for NOC-style monitoring
+      - GF_USERS_DEFAULT_THEME=dark
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    networks:
+      - monitoring
+
+# =============================================================================
+# NETWORKS
+# =============================================================================
+# A dedicated bridge network isolates our monitoring stack from other
+# Docker containers. Containers reference each other by service name
+# (e.g., "prometheus" resolves to the Prometheus container's IP).
+# =============================================================================
+networks:
+  monitoring:
+    driver: bridge
+
+# =============================================================================
+# NAMED VOLUMES
+# =============================================================================
+# Named volumes persist data across container restarts and recreations.
+# Even if you run "docker compose down", the data survives.
+# To truly delete everything: docker compose down -v (the -v flag removes volumes)
+# =============================================================================
+volumes:
+  prometheus_data:
+    name: wifimon_prometheus_data
+  grafana_data:
+    name: wifimon_grafana_data

@@ -1,0 +1,349 @@
+# =============================================================================
+# SNMP EXPORTER CONFIGURATION — MikroTik CHR v7 Module
+# =============================================================================
+#
+# This file tells the SNMP Exporter which OIDs to pull from our MikroTik
+# router and how to translate them into Prometheus metrics.
+#
+# WHY THIS FORMAT?
+# ----------------
+# Starting with snmp_exporter v0.24+, configs use the "auths + modules" format.
+# This replaces the old generator-based workflow. We define our OIDs directly
+# here — no need to download MIB files or run the generator binary.
+#
+# HOW IT WORKS:
+# 1. Prometheus tells the SNMP Exporter: "scrape target X using module Y"
+# 2. Exporter sends SNMP GET/WALK requests to the router for the OIDs listed
+# 3. Exporter translates SNMP responses into Prometheus-format metrics
+# 4. Prometheus stores them in its time-series database
+#
+# NETWORK PATH (critical to understand):
+#   SNMP Exporter container
+#     → host.docker.internal:16161 (Docker Desktop DNS)
+#       → Windows host port 16161
+#         → VirtualBox NAT forwarding
+#           → MikroTik CHR guest port 161 (SNMP)
+#
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# AUTHENTICATION PROFILES
+# -----------------------------------------------------------------------------
+# We define how to authenticate with the router's SNMP agent.
+# MikroTik CHR with default SNMP setup uses SNMPv2c and community "public".
+#
+# ⚠️  In production, you would use SNMPv3 with encryption (authPriv).
+#     For our lab/portfolio project, SNMPv2c is simple and sufficient.
+# -----------------------------------------------------------------------------
+auths:
+  public_v2:
+    community: public
+    version: 2
+
+# -----------------------------------------------------------------------------
+# MONITORING MODULES
+# -----------------------------------------------------------------------------
+# Each module is a collection of OIDs grouped by purpose. We create a single
+# "mikrotik" module that covers everything a WiFi business owner cares about:
+#
+#   1. Interface traffic  → "Are we hitting the ISP bandwidth cap?"
+#   2. CPU load           → "Is the router overloaded with too many users?"
+#   3. Memory usage       → "Do we need to upgrade the router?"
+#   4. System uptime      → "When was the last outage?"
+# -----------------------------------------------------------------------------
+modules:
+  mikrotik:
+
+    # GET — for scalar (single-value) OIDs. More efficient than WALK.
+    # These are global system properties, not table entries.
+    get:
+      - 1.3.6.1.2.1.1.1.0    # sysDescr   → RouterOS version string
+      - 1.3.6.1.2.1.1.3.0    # sysUpTime  → hundredths of seconds since boot
+      - 1.3.6.1.2.1.1.5.0    # sysName    → router hostname
+
+    # WALK — for table OIDs. The exporter walks the entire subtree and
+    # discovers all rows (e.g., all interfaces, all CPU cores, all storage).
+    walk:
+      - 1.3.6.1.2.1.2.2      # IF-MIB::ifTable   (basic interface stats)
+      - 1.3.6.1.2.1.31.1.1   # IF-MIB::ifXTable  (64-bit HC counters)
+      - 1.3.6.1.2.1.25.3.3   # HOST-RESOURCES-MIB::hrProcessorTable (CPU)
+      - 1.3.6.1.2.1.25.2.3   # HOST-RESOURCES-MIB::hrStorageTable (RAM/disk)
+
+    # -------------------------------------------------------------------
+    # METRIC DEFINITIONS
+    # -------------------------------------------------------------------
+    # Each entry maps an SNMP OID to a Prometheus metric.
+    #
+    # For table entries (like interfaces), we specify:
+    #   - indexes:  which column is the row key (e.g., ifIndex)
+    #   - lookups:  grab a human-readable label from another column
+    #               (e.g., ifDescr="ether1" instead of just ifIndex=1)
+    # -------------------------------------------------------------------
+    metrics:
+
+      # =================================================================
+      # SYSTEM IDENTITY & UPTIME (SNMPv2-MIB)
+      # =================================================================
+      # Business value: The owner can see at a glance if the router
+      # recently rebooted (potential ISP/power issue) and verify the
+      # correct device is being monitored.
+      # =================================================================
+
+      - name: sysUpTime
+        oid: 1.3.6.1.2.1.1.3
+        type: gauge
+        help: >-
+          Time since the router was last rebooted, in hundredths of a second.
+          Divide by 100 to get seconds, by 8640000 to get days.
+          A sudden drop to zero means the router rebooted.
+
+      - name: sysDescr
+        oid: 1.3.6.1.2.1.1.1
+        type: DisplayString
+        help: >-
+          Full system description including RouterOS version.
+          Exposed as a label on an info metric (value=1).
+
+      - name: sysName
+        oid: 1.3.6.1.2.1.1.5
+        type: DisplayString
+        help: >-
+          Administratively-assigned router hostname.
+          Useful for multi-router setups to identify which device is which.
+
+      # =================================================================
+      # INTERFACE TRAFFIC COUNTERS (IF-MIB)
+      # =================================================================
+      # These are the star metrics. ifHCInOctets and ifHCOutOctets are
+      # 64-bit counters that count every byte flowing through an interface.
+      #
+      # WHY 64-bit (HC) instead of 32-bit?
+      # -----------------------------------
+      # A 32-bit counter maxes out at ~4.3 GB. On a 100 Mbps link, that
+      # wraps around in ~5.7 minutes! The 64-bit HC counters won't wrap
+      # for millions of years. MikroTik v7 supports them fully.
+      #
+      # HOW PROMETHEUS USES COUNTERS:
+      # Counters only go up. Prometheus uses rate() to calculate the
+      # per-second change, giving us actual bandwidth in bytes/sec.
+      # =================================================================
+
+      - name: ifOperStatus
+        oid: 1.3.6.1.2.1.2.2.1.8
+        type: gauge
+        help: >-
+          Current operational state of the interface.
+          1=up (good), 2=down (problem), 3=testing.
+          The business owner sees a green/red indicator per interface.
+        indexes:
+          - labelname: ifIndex
+            type: gauge
+        lookups:
+          - labels: [ifIndex]
+            labelname: ifDescr
+            oid: 1.3.6.1.2.1.2.2.1.2
+            type: DisplayString
+        enum_values:
+          1: up
+          2: down
+          3: testing
+
+      - name: ifHCInOctets
+        oid: 1.3.6.1.2.1.31.1.1.1.6
+        type: counter
+        help: >-
+          Total bytes RECEIVED on this interface since boot (64-bit).
+          Use rate(ifHCInOctets[5m]) * 8 to get bits per second (download).
+          The business owner sees this as "Download bandwidth" on the dashboard.
+        indexes:
+          - labelname: ifIndex
+            type: gauge
+        lookups:
+          - labels: [ifIndex]
+            labelname: ifDescr
+            oid: 1.3.6.1.2.1.2.2.1.2
+            type: DisplayString
+
+      - name: ifHCOutOctets
+        oid: 1.3.6.1.2.1.31.1.1.1.10
+        type: counter
+        help: >-
+          Total bytes TRANSMITTED on this interface since boot (64-bit).
+          Use rate(ifHCOutOctets[5m]) * 8 to get bits per second (upload).
+          The business owner sees this as "Upload bandwidth" on the dashboard.
+        indexes:
+          - labelname: ifIndex
+            type: gauge
+        lookups:
+          - labels: [ifIndex]
+            labelname: ifDescr
+            oid: 1.3.6.1.2.1.2.2.1.2
+            type: DisplayString
+
+      - name: ifHighSpeed
+        oid: 1.3.6.1.2.1.31.1.1.1.15
+        type: gauge
+        help: >-
+          Interface speed in Mbps. Useful for calculating utilization
+          percentage: (actual bandwidth / ifHighSpeed * 100).
+          Helps the owner know when they're hitting their link capacity.
+        indexes:
+          - labelname: ifIndex
+            type: gauge
+        lookups:
+          - labels: [ifIndex]
+            labelname: ifDescr
+            oid: 1.3.6.1.2.1.2.2.1.2
+            type: DisplayString
+
+      - name: ifInErrors
+        oid: 1.3.6.1.2.1.2.2.1.14
+        type: counter
+        help: >-
+          Inbound packets that contained errors. Non-zero means potential
+          cable, hardware, or interference issue. Important for WiFi
+          businesses where physical layer problems cause slow speeds.
+        indexes:
+          - labelname: ifIndex
+            type: gauge
+        lookups:
+          - labels: [ifIndex]
+            labelname: ifDescr
+            oid: 1.3.6.1.2.1.2.2.1.2
+            type: DisplayString
+
+      - name: ifOutErrors
+        oid: 1.3.6.1.2.1.2.2.1.20
+        type: counter
+        help: >-
+          Outbound packets that contained errors.
+        indexes:
+          - labelname: ifIndex
+            type: gauge
+        lookups:
+          - labels: [ifIndex]
+            labelname: ifDescr
+            oid: 1.3.6.1.2.1.2.2.1.2
+            type: DisplayString
+
+      - name: ifInDiscards
+        oid: 1.3.6.1.2.1.2.2.1.13
+        type: counter
+        help: >-
+          Inbound packets discarded even though no errors were detected.
+          High values may indicate congestion — the router is dropping
+          packets because its buffers are full. Bad for video/VoIP users.
+        indexes:
+          - labelname: ifIndex
+            type: gauge
+        lookups:
+          - labels: [ifIndex]
+            labelname: ifDescr
+            oid: 1.3.6.1.2.1.2.2.1.2
+            type: DisplayString
+
+      - name: ifOutDiscards
+        oid: 1.3.6.1.2.1.2.2.1.19
+        type: counter
+        help: >-
+          Outbound packets discarded.
+        indexes:
+          - labelname: ifIndex
+            type: gauge
+        lookups:
+          - labels: [ifIndex]
+            labelname: ifDescr
+            oid: 1.3.6.1.2.1.2.2.1.2
+            type: DisplayString
+
+      # =================================================================
+      # CPU METRICS (HOST-RESOURCES-MIB)
+      # =================================================================
+      # Business value: MikroTik routers doing NAT, firewall, and QoS
+      # for many users can get CPU-bound. A sustained >80% CPU means
+      # the business needs a beefier router or should offload some work.
+      # =================================================================
+
+      - name: hrProcessorLoad
+        oid: 1.3.6.1.2.1.25.3.3.1.2
+        type: gauge
+        help: >-
+          CPU utilization as a percentage (0-100).
+          On MikroTik, this covers all CPU cores. The CHR typically
+          reports a single virtual CPU. Values above 80% sustained
+          indicate the router needs an upgrade or traffic shaping.
+        indexes:
+          - labelname: hrDeviceIndex
+            type: gauge
+
+      # =================================================================
+      # MEMORY / STORAGE METRICS (HOST-RESOURCES-MIB)
+      # =================================================================
+      # Business value: If memory usage is consistently above 85%, the
+      # router may start dropping connections or behaving unpredictably.
+      # The owner should plan an upgrade before hitting that threshold.
+      #
+      # HOW MEMORY IS CALCULATED:
+      # The hrStorageTable reports memory in "allocation units".
+      # Actual bytes = hrStorageUsed × hrStorageAllocationUnits
+      # But for percentage, the units cancel out:
+      #   Memory % = (hrStorageUsed / hrStorageSize) × 100
+      # =================================================================
+
+      - name: hrStorageDescr
+        oid: 1.3.6.1.2.1.25.2.3.1.3
+        type: DisplayString
+        help: >-
+          Description of the storage area. MikroTik typically reports
+          "main memory" for RAM and disk names for flash storage.
+          Used as a label to filter for RAM vs. disk in PromQL queries.
+        indexes:
+          - labelname: hrStorageIndex
+            type: gauge
+
+      - name: hrStorageAllocationUnits
+        oid: 1.3.6.1.2.1.25.2.3.1.4
+        type: gauge
+        help: >-
+          Size in bytes of each allocation unit for this storage area.
+          Multiply by hrStorageSize to get total bytes.
+          Typically 1024 (1 KB) for MikroTik memory.
+        indexes:
+          - labelname: hrStorageIndex
+            type: gauge
+        lookups:
+          - labels: [hrStorageIndex]
+            labelname: hrStorageDescr
+            oid: 1.3.6.1.2.1.25.2.3.1.3
+            type: DisplayString
+
+      - name: hrStorageSize
+        oid: 1.3.6.1.2.1.25.2.3.1.5
+        type: gauge
+        help: >-
+          Total size of the storage area, in allocation units.
+          For RAM: total memory available to the router.
+        indexes:
+          - labelname: hrStorageIndex
+            type: gauge
+        lookups:
+          - labels: [hrStorageIndex]
+            labelname: hrStorageDescr
+            oid: 1.3.6.1.2.1.25.2.3.1.3
+            type: DisplayString
+
+      - name: hrStorageUsed
+        oid: 1.3.6.1.2.1.25.2.3.1.6
+        type: gauge
+        help: >-
+          Amount of storage currently in use, in allocation units.
+          For RAM: (hrStorageUsed / hrStorageSize × 100) = memory usage %.
+          The business owner sees this as a simple percentage gauge.
+        indexes:
+          - labelname: hrStorageIndex
+            type: gauge
+        lookups:
+          - labels: [hrStorageIndex]
+            labelname: hrStorageDescr
+            oid: 1.3.6.1.2.1.25.2.3.1.3
+            type: DisplayString

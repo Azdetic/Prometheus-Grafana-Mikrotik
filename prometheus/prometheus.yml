@@ -1,0 +1,109 @@
+# =============================================================================
+# PROMETHEUS CONFIGURATION — WiFi Monitor Project
+# =============================================================================
+#
+# Prometheus is our time-series database. Every 30 seconds, it "scrapes"
+# (pulls) metrics from the SNMP Exporter and stores them with timestamps.
+#
+# HOW THE SNMP EXPORTER SCRAPE WORKS:
+# ------------------------------------
+# Unlike normal exporters, the SNMP Exporter doesn't hold its own data.
+# It's a "proxy" — Prometheus asks it to go query the router on demand.
+#
+# The flow for each scrape:
+#   1. Prometheus calls: http://snmp-exporter:9116/snmp
+#      ?target=host.docker.internal:16161  (the router)
+#      &module=mikrotik                    (which OIDs to pull)
+#      &auth=public_v2                     (SNMPv2c, community=public)
+#
+#   2. SNMP Exporter sends SNMP GET/WALK to host.docker.internal:16161
+#
+#   3. VirtualBox forwards port 16161 → MikroTik CHR port 161
+#
+#   4. MikroTik responds with SNMP data
+#
+#   5. SNMP Exporter translates it to Prometheus metrics and returns them
+#
+#   6. Prometheus stores the metrics with a timestamp
+#
+# WHY 30s SCRAPE INTERVAL?
+# For a single-router lab, 30s gives good graph granularity without
+# hammering the router with SNMP requests. In production with 100+
+# devices, you might increase this to 60s or even 120s.
+# =============================================================================
+
+global:
+  scrape_interval: 30s       # How often Prometheus pulls data from targets
+  evaluation_interval: 30s   # How often it evaluates alerting rules (future use)
+
+# =============================================================================
+# SCRAPE CONFIGURATIONS
+# =============================================================================
+scrape_configs:
+
+  # -------------------------------------------------------------------
+  # Job: MikroTik Router via SNMP Exporter
+  # -------------------------------------------------------------------
+  # This is the heart of our monitoring pipeline.
+  #
+  # RELABELING TRICK (important to understand):
+  # By default, Prometheus sets the "instance" label to the target address.
+  # With the SNMP Exporter pattern, we need to:
+  #   1. Take the target address (router) and pass it as ?target= parameter
+  #   2. Take the module name and pass it as ?module= parameter
+  #   3. Override the actual scrape address to point to the exporter container
+  #   4. Set "instance" to show the ROUTER address, not the exporter address
+  #
+  # Without relabeling, the instance would show "snmp-exporter:9116"
+  # which is meaningless. With relabeling, it shows the actual router
+  # address — much more useful in a multi-device environment.
+  # -------------------------------------------------------------------
+  - job_name: "mikrotik_snmp"
+    scrape_interval: 30s
+    scrape_timeout: 20s       # SNMP can be slow; give it extra time
+
+    # The target here is the ROUTER, not the exporter.
+    # The relabeling below redirects the actual scrape to the exporter.
+    static_configs:
+      - targets:
+          - "192.168.56.103"   # MikroTik CHR via VirtualBox port forward
+        labels:
+          device: "mikrotik-chr"           # Custom label for easy filtering
+
+    # Tell Prometheus to scrape /snmp instead of the default /metrics
+    metrics_path: /snmp
+
+    # Pass the module and auth as query parameters to the SNMP Exporter
+    params:
+      module: ["mikrotik"]     # Matches the module name in snmp.yml
+      auth: ["public_v2"]      # Matches the auth name in snmp.yml
+
+    # RELABELING MAGIC
+    # This is the standard "multi-target exporter" pattern from Prometheus docs.
+    # It lets us define router targets in static_configs while the actual
+    # HTTP scrape goes to the SNMP Exporter container.
+    relabel_configs:
+      # Step 1: Copy the target address (router) into the ?target= parameter
+      - source_labels: [__address__]
+        target_label: __param_target
+
+      # Step 2: Set the "instance" label to the router address
+      #         (so dashboards show "host.docker.internal:16161", not "snmp-exporter:9116")
+      - source_labels: [__param_target]
+        target_label: instance
+
+      # Step 3: Override the actual scrape address to the SNMP Exporter container
+      #         Prometheus will HTTP GET http://snmp-exporter:9116/snmp?target=...&module=...
+      - target_label: __address__
+        replacement: "snmp-exporter:9116"
+
+  # -------------------------------------------------------------------
+  # Job: Prometheus Self-Monitoring
+  # -------------------------------------------------------------------
+  # Prometheus scrapes itself so you can monitor the monitor.
+  # Useful for checking scrape durations, memory usage, etc.
+  # -------------------------------------------------------------------
+  - job_name: "prometheus"
+    static_configs:
+      - targets:
+          - "localhost:9090"

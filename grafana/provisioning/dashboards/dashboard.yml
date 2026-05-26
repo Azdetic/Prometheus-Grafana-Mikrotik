@@ -1,0 +1,25 @@
+# =============================================================================
+# GRAFANA DASHBOARD PROVISIONING
+# =============================================================================
+#
+# This tells Grafana to automatically load dashboard JSON files from a
+# specific directory on first boot. No manual import needed.
+#
+# The dashboard JSON files (like mikrotik.json) placed in the same
+# directory as this YAML file will be auto-discovered and loaded.
+# =============================================================================
+
+apiVersion: 1
+
+providers:
+  - name: "WiFi Monitor Dashboards"
+    orgId: 1
+    folder: ""                  # Load into the root folder (General)
+    type: file
+    disableDeletion: false      # Allow deleting via the UI
+    editable: true              # Allow editing in the UI
+    updateIntervalSeconds: 30   # Check for updated JSON files every 30s
+    allowUiUpdates: true        # Allow saving changes made in the UI
+    options:
+      path: /etc/grafana/provisioning/dashboards
+      foldersFromFilesStructure: false

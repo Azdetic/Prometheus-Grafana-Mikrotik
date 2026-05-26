@@ -1,0 +1,25 @@
+# =============================================================================
+# GRAFANA DATASOURCE PROVISIONING
+# =============================================================================
+#
+# This file tells Grafana where to find Prometheus automatically on first boot.
+# Without it, you'd have to manually add the data source in the Grafana UI.
+#
+# WHY "http://prometheus:9090"?
+# Because Grafana runs inside a Docker container, it can't use "localhost".
+# Docker's internal DNS resolves the service name "prometheus" to the
+# Prometheus container's IP address within the "monitoring" network.
+# =============================================================================
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus              # Fixed UID so dashboard JSON can reference it reliably
+    access: proxy                # Grafana server proxies requests to Prometheus
+    url: http://prometheus:9090  # Container-to-container communication
+    isDefault: true              # All panels use this datasource by default
+    editable: true               # Allow editing in the UI for experimentation
+    jsonData:
+      timeInterval: "30s"        # Match our Prometheus scrape interval
